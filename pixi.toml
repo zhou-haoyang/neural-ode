@@ -1,0 +1,20 @@
+[workspace]
+channels = ["conda-forge"]
+name = "neural-ode"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+fenics-dolfinx = ">=0.9.0,<0.10"
+mpich = ">=4.3.2,<5"
+pyvista = ">=0.46.3,<0.47"
+imageio = ">=2.37.0,<3"
+
+[pypi-dependencies]
+lightning = ">=2.5.5, <3"
+h5py = ">=3.15.1, <4"
+tensorboard = ">=2.20.0, <3"
+pyyaml = ">=6.0.3, <7"
+torchdiffeq = ">=0.2.5, <0.3"
