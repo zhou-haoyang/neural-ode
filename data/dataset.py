@@ -23,6 +23,8 @@ class HyperelasticityDataset(Dataset):
         time_indices: Optional[List[int]] = None,
         normalize: bool = True,
         subsample_points: Optional[int] = None,
+        seq_length: Optional[int] = None,
+        seq_stride: int = 1,
     ):
         """Initialize HyperelasticityDataset.
         
@@ -33,6 +35,8 @@ class HyperelasticityDataset(Dataset):
             time_indices: Specific time step indices to load (default: all)
             normalize: Whether to normalize data to zero mean and unit variance
             subsample_points: If set, randomly subsample this many spatial points
+            seq_length: If set, return sequences of this temporal length
+            seq_stride: Stride between sequence starts (for sliding windows)
         """
         super().__init__()
         
@@ -40,6 +44,11 @@ class HyperelasticityDataset(Dataset):
         self.fields = fields or ["displacement", "velocity"]
         self.normalize = normalize
         self.subsample_points = subsample_points
+        # Sequence sampling parameters. If seq_length is provided, the dataset
+        # will return sequences of shape (seq_length, n_features) instead of
+        # single time steps.
+        self.seq_length = seq_length
+        self.seq_stride = int(seq_stride)
         
         # Load metadata
         metadata_path = self.data_dir / "metadata.json"
@@ -62,6 +71,19 @@ class HyperelasticityDataset(Dataset):
         else:
             self.mean = 0.0
             self.std = 1.0
+
+        # If sequence sampling is enabled, compute valid start indices for
+        # sliding window sequences.
+        if self.seq_length is not None:
+            n_timesteps = len(self.time_steps)
+            if self.seq_length > n_timesteps:
+                raise ValueError(
+                    f"seq_length={self.seq_length} is larger than available time steps {n_timesteps}"
+                )
+            # start indices where a full sequence fits
+            self.sequence_starts = list(range(0, n_timesteps - self.seq_length + 1, self.seq_stride))
+        else:
+            self.sequence_starts = None
             
     def _load_data(
         self, 
@@ -98,8 +120,8 @@ class HyperelasticityDataset(Dataset):
                     if field in func_group:
                         field_group = func_group[field]
                         
-                        # Get all time step keys (they are usually integers as strings)
-                        step_keys = sorted(field_group.keys(), key=lambda x: int(x))
+                        # Get all time step keys (they are usually floats as strings)
+                        step_keys = sorted(field_group.keys(), key=lambda x: float(x))
                         
                         if time_indices is not None:
                             step_keys = [step_keys[i] for i in time_indices if i < len(step_keys)]
@@ -153,6 +175,9 @@ class HyperelasticityDataset(Dataset):
         
     def __len__(self) -> int:
         """Return number of samples (time steps)."""
+        # If sequences are requested, dataset length is number of sequences
+        if self.sequence_starts is not None:
+            return len(self.sequence_starts)
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -167,11 +192,29 @@ class HyperelasticityDataset(Dataset):
                 - 'time': Time value
                 - 'idx': Time step index
         """
+        if self.sequence_starts is not None:
+            # idx indexes into the sequence starts
+            start = self.sequence_starts[idx]
+            end = start + self.seq_length
+            # slice along time dimension: (seq_length, n_features)
+            state_seq = self.data[start:end]
+            time_seq = self.time_steps[start:end]
+
+            if self.normalize:
+                state_seq = (state_seq - self.mean) / self.std
+
+            return {
+                "state": state_seq,  # (seq_length, features)
+                "time": torch.tensor(time_seq, dtype=torch.float32),
+                "idx": torch.tensor([start], dtype=torch.long),
+            }
+
+        # Single time-step behavior (backwards compatible)
         state = self.data[idx]
-        
+
         if self.normalize:
             state = (state - self.mean) / self.std
-            
+
         return {
             "state": state,
             "time": torch.tensor([self.time_steps[idx]], dtype=torch.float32),

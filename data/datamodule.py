@@ -15,7 +15,7 @@ class HyperelasticityDataModule(L.LightningDataModule):
     
     def __init__(
         self,
-        data_dir: str = "results",
+        data_dir: str = ".data/sim/beam",
         fields: Optional[List[str]] = None,
         batch_size: int = 32,
         train_split: float = 0.7,
@@ -23,6 +23,8 @@ class HyperelasticityDataModule(L.LightningDataModule):
         test_split: float = 0.15,
         normalize: bool = True,
         subsample_points: Optional[int] = None,
+        seq_length: Optional[int] = None,
+        seq_stride: int = 1,
         num_workers: int = 4,
         pin_memory: bool = True,
     ):
@@ -51,6 +53,8 @@ class HyperelasticityDataModule(L.LightningDataModule):
         self.test_split = test_split
         self.normalize = normalize
         self.subsample_points = subsample_points
+        self.seq_length = seq_length
+        self.seq_stride = seq_stride
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         
@@ -76,6 +80,8 @@ class HyperelasticityDataModule(L.LightningDataModule):
                 fields=self.fields,
                 normalize=self.normalize,
                 subsample_points=self.subsample_points,
+                seq_length=self.seq_length,
+                seq_stride=self.seq_stride,
             )
             
             # Split into train/val/test
