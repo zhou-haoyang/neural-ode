@@ -1,6 +1,6 @@
 """Data loading and processing utilities."""
 
-from .dataset import HyperelasticityDataset
 from .datamodule import HyperelasticityDataModule
+from .dataset import HyperelasticityDataset
 
 __all__ = ["HyperelasticityDataset", "HyperelasticityDataModule"]

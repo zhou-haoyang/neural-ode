@@ -1,6 +1,6 @@
 """PyTorch Lightning module for training Latent ODE models."""
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import lightning as L
 import torch
@@ -105,31 +105,45 @@ class LatentODELightning(L.LightningModule):
     def _predict_sequence(
         self,
         batch: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        fields: Optional[List[str]] = None,
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Predict state sequence from initial condition.
 
         Args:
-            batch: Batch dictionary with 'state' and 'time'
+            batch: Batch dictionary with field data and 'time'
+            fields: List of field names to predict (default: all non-metadata fields)
 
         Returns:
-            Tuple of (x_pred, states) where:
-                - x_pred: Predicted states (batch_size, seq_len, state_dim)
-                - states: Ground truth states (batch_size, seq_len, state_dim)
+            Tuple of (pred_dict, ref_dict) where each is a dict mapping field names to tensors:
+                - field data: (batch_size, seq_len, field_dim)
         """
-        states = batch["state"]  # (batch_size, seq_len, state_dim)
         times = batch["time"]  # (batch_size, seq_len)
 
+        states = torch.cat([batch["displacement"], batch["velocity"]], dim=-1).flatten(
+            start_dim=2
+        )  # (batch_size, seq_len, total_dim)
+
+        batch["states"] = states
+
         # Use first state as initial condition
-        x0 = states[:, 0, :]  # (batch_size, state_dim)
+        x0 = states[:, 0, :]  # (batch_size, total_dim)
         t = times[0, :]  # (seq_len,) - assume same for all in batch
 
         # Predict trajectory
-        x_pred = self.latent_ode(x0, t)  # (seq_len, batch_size, state_dim)
+        x_pred = self.latent_ode(x0, t)  # (seq_len, batch_size, total_dim)
 
         # Transpose to match target shape
-        x_pred = x_pred.permute(1, 0, 2)  # (batch_size, seq_len, state_dim)
+        x_pred = x_pred.permute(1, 0, 2)  # (batch_size, seq_len, total_dim)
 
-        return x_pred, states
+        num_points = batch["displacement"].shape[2]
+        pred_data = x_pred.unflatten(-1, (num_points, 6))
+        pred_dict = {
+            "states": x_pred,
+            "displacement": pred_data[..., :3],
+            "velocity": pred_data[..., 3:],
+        }
+
+        return pred_dict, batch
 
     def _compute_loss(
         self,
@@ -157,7 +171,10 @@ class LatentODELightning(L.LightningModule):
             pred_loss = recon_loss
 
         # Combined loss
-        total_loss = self.hparams.reconstruction_weight * recon_loss + self.hparams.prediction_weight * pred_loss
+        total_loss = (
+            self.hparams.reconstruction_weight * recon_loss
+            + self.hparams.prediction_weight * pred_loss
+        )
 
         # Compute relative error
         with torch.no_grad():
@@ -172,8 +189,8 @@ class LatentODELightning(L.LightningModule):
 
     def _visualize_mesh(
         self,
-        x_pred: torch.Tensor,
-        x_ref: torch.Tensor,
+        pred_dict: Dict[str, torch.Tensor],
+        ref_dict: Dict[str, torch.Tensor],
     ) -> None:
         """Visualize predicted and reference states on mesh.
 
@@ -183,18 +200,19 @@ class LatentODELightning(L.LightningModule):
         """
 
         dataset: HyperelasticityDataset = self.trainer.datamodule.dataset
-        batch_size, seq_len, state_dim = x_pred.shape
-        x_pred = dataset.denormalize(x_pred).reshape(batch_size, seq_len, -1, 2, 3)
-        x_ref = dataset.denormalize(x_ref).reshape(batch_size, seq_len, -1, 2, 3)
+
+        u_ref = dataset.denormalize("displacement", ref_dict["displacement"].cpu())[0]
+        u_pred = dataset.denormalize("displacement", pred_dict["displacement"].cpu())[0]
+
         self.logger.experiment.add_mesh(
             tag="predicted_mesh",
-            vertices=dataset.points + x_pred[0, :, :, 0, :],  # First sample in batch
+            vertices=dataset.points + u_pred,  # First sample in batch
             faces=dataset.faces.unsqueeze(0),
             global_step=self.current_epoch,
         )
         self.logger.experiment.add_mesh(
             tag="reference_mesh",
-            vertices=dataset.points + x_ref[0, :, :, 0, :],  # First sample in batch
+            vertices=dataset.points + u_ref,  # First sample in batch
             faces=dataset.faces.unsqueeze(0),
             global_step=self.current_epoch,
         )
@@ -207,23 +225,32 @@ class LatentODELightning(L.LightningModule):
         """Training step.
 
         Args:
-            batch: Batch dictionary
+            batch: Batch dictionary with field data
             batch_idx: Batch index
 
         Returns:
             Loss tensor
         """
         # Predict sequence
-        x_pred, x_ref = self._predict_sequence(batch)
+        pred_dict, ref_dict = self._predict_sequence(batch)
 
         # Compute loss
-        metrics = self._compute_loss(x_pred, x_ref)
+        metrics = self._compute_loss(pred_dict["states"], ref_dict["states"])
 
         # Log metrics
-        self.log("train/loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True)
+        self.log(
+            "train/loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True
+        )
+        self.log(
+            "train/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True
+        )
         self.log("train/pred_loss", metrics["pred_loss"], on_step=False, on_epoch=True)
-        self.log("train/relative_error", metrics["relative_error"], on_step=False, on_epoch=True)
+        self.log(
+            "train/relative_error",
+            metrics["relative_error"],
+            on_step=False,
+            on_epoch=True,
+        )
 
         return metrics["loss"]
 
@@ -235,23 +262,30 @@ class LatentODELightning(L.LightningModule):
         """Validation step.
 
         Args:
-            batch: Batch dictionary
+            batch: Batch dictionary with field data
             batch_idx: Batch index
         """
         # Predict sequence
-        x_pred, x_ref = self._predict_sequence(batch)
+        pred_dict, ref_dict = self._predict_sequence(batch)
 
         # Compute loss
-        metrics = self._compute_loss(x_pred, x_ref)
+        metrics = self._compute_loss(pred_dict["states"], ref_dict["states"])
 
         # Log metrics
-        self.log("val/loss", metrics["loss"], on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            "val/loss", metrics["loss"], on_step=False, on_epoch=True, prog_bar=True
+        )
         self.log("val/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True)
         self.log("val/pred_loss", metrics["pred_loss"], on_step=False, on_epoch=True)
-        self.log("val/relative_error", metrics["relative_error"], on_step=False, on_epoch=True)
+        self.log(
+            "val/relative_error",
+            metrics["relative_error"],
+            on_step=False,
+            on_epoch=True,
+        )
 
         # Visualize mesh
-        self._visualize_mesh(x_pred.detach().cpu(), x_ref.detach().cpu())
+        self._visualize_mesh(pred_dict, ref_dict)
 
     def test_step(
         self,
@@ -261,14 +295,14 @@ class LatentODELightning(L.LightningModule):
         """Test step.
 
         Args:
-            batch: Batch dictionary
+            batch: Batch dictionary with field data
             batch_idx: Batch index
         """
         # Predict sequence
-        x_pred, x_ref = self._predict_sequence(batch)
+        pred_dict, ref_dict = self._predict_sequence(batch)
 
         # Compute loss
-        metrics = self._compute_loss(x_pred, x_ref)
+        metrics = self._compute_loss(pred_dict["states"], ref_dict["states"])
 
         # Log metrics
         self.log("test/loss", metrics["loss"])

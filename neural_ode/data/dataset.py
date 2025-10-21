@@ -5,13 +5,14 @@ expects fields to be written as point data in the XDMF time series written by
 DOLFINx and does not rely on reading raw HDF5 groups.
 """
 
-import torch
-from torch.utils.data import Dataset
-import numpy as np
-from meshio.xdmf import TimeSeriesReader as XDMFReader
-from pathlib import Path
-from typing import Optional, List, Tuple, Dict
 import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from meshio.xdmf import TimeSeriesReader as XDMFReader
+from torch.utils.data import Dataset
 
 
 def convert_xdmf_cell_to_trimesh(cell: np.ndarray, type: str):
@@ -112,16 +113,17 @@ class HyperelasticityDataset(Dataset):
                 f"XDMF file not found: {self.xdmf_path}. This dataset requires 'solution.xdmf'."
             )
 
-        self.data, self.time_steps, self.points, self.faces = self._load_data(
+        self.field_data, self.time_steps, self.points, self.faces = self._load_data(
             time_indices
         )
 
-        # Compute normalization statistics
+        # Compute normalization statistics per field
         if self.normalize:
             self._compute_normalization_stats()
         else:
-            self.mean = 0.0
-            self.std = 1.0
+            self.field_stats = {
+                field: {"mean": 0.0, "std": 1.0} for field in self.fields
+            }
 
         # If sequence sampling is enabled, compute valid start indices for
         # sliding window sequences.
@@ -140,14 +142,14 @@ class HyperelasticityDataset(Dataset):
 
     def _load_data(
         self, time_indices: Optional[List[int]] = None
-    ) -> Tuple[torch.Tensor, np.ndarray]:
+    ) -> Tuple[Dict[str, torch.Tensor], np.ndarray, torch.Tensor, torch.Tensor]:
         """Load data from XDMF (meshio).
 
         Args:
             time_indices: Specific time step indices to load
 
         Returns:
-            Tuple of (data tensor, time_steps array)
+            Tuple of (field_data dict, time_steps array, points tensor, faces tensor)
         """
         # Only meshio XDMF path is supported
         all_steps: dict[str, list[np.ndarray]] = {}
@@ -190,53 +192,59 @@ class HyperelasticityDataset(Dataset):
                             data = reader._read_data_item(element[0])
                             all_steps.setdefault(attrib["Name"], []).append(data)
 
-        # Stack across time: (n_timesteps, n_points, n_features)
-        all_data = np.concatenate(
-            [np.stack(all_steps[field], axis=0) for field in self.fields],
-            axis=-1,
-        )
         time_steps = np.asarray(times, dtype=float)
 
-        # Subsample spatial points if requested
-        if (
-            self.subsample_points is not None
-            and self.subsample_points < all_data.shape[1]
-        ):
-            rng = np.random.RandomState(42)
-            indices = rng.choice(
-                all_data.shape[1], self.subsample_points, replace=False
-            )
-            all_data = all_data[:, indices, :]
+        # Store each field separately as a dict: {field_name: (n_timesteps, n_points, n_features)}
+        field_data = {}
+        for field_name in self.fields:
+            field_array = np.stack(
+                all_steps[field_name], axis=0
+            )  # (n_timesteps, n_points, n_features)
 
-        # Flatten spatial dimensions: (n_timesteps, n_points * n_features)
-        n_timesteps = all_data.shape[0]
-        all_data = all_data.reshape(n_timesteps, -1)
+            # Subsample spatial points if requested
+            if (
+                self.subsample_points is not None
+                and self.subsample_points < field_array.shape[1]
+            ):
+                rng = np.random.RandomState(42)
+                indices = rng.choice(
+                    field_array.shape[1], self.subsample_points, replace=False
+                )
+                field_array = field_array[:, indices, :]
 
-        # Convert to torch tensor
-        data_tensor = torch.from_numpy(all_data).float()
+            # Keep spatial dimensions: (n_timesteps, n_points, n_features)
+            field_data[field_name] = torch.from_numpy(field_array).float()
+
         points_tensor = torch.from_numpy(points).float()
         faces_tensor = torch.from_numpy(faces).long()
 
-        print(f"Loaded data shape: {data_tensor.shape}")
+        print(f"Loaded fields: {list(field_data.keys())}")
+        for field_name, data in field_data.items():
+            print(f"  {field_name}: {data.shape}")
         print(f"Number of time steps: {len(time_steps)}")
         print(f"Number of spatial points: {points.shape[0]}")
         print(f"Number of faces: {faces.shape[0]}")
 
-        return data_tensor, time_steps, points_tensor, faces_tensor
+        return field_data, time_steps, points_tensor, faces_tensor
 
     def _compute_normalization_stats(self) -> None:
-        """Compute mean and std for normalization."""
-        self.mean = self.data.mean(dim=0, keepdim=True)
-        self.std = self.data.std(dim=0, keepdim=True)
-        # Avoid division by zero
-        self.std = torch.where(self.std > 1e-8, self.std, torch.ones_like(self.std))
+        """Compute mean and std for normalization per field."""
+        self.field_stats = {}
+        for field_name, data in self.field_data.items():
+            mean = data.mean(dim=0, keepdim=True)
+            std = data.std(dim=0, keepdim=True)
+            # Avoid division by zero
+            std = torch.where(std > 1e-8, std, torch.ones_like(std))
+            self.field_stats[field_name] = {"mean": mean, "std": std}
 
     def __len__(self) -> int:
         """Return number of samples (time steps)."""
         # If sequences are requested, dataset length is number of sequences
         if self.sequence_starts is not None:
             return len(self.sequence_starts)
-        return len(self.data)
+        # Get length from first field
+        first_field = next(iter(self.field_data.values()))
+        return len(first_field)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample.
@@ -246,53 +254,90 @@ class HyperelasticityDataset(Dataset):
 
         Returns:
             Dictionary containing:
-                - 'state': Flattened state vector (normalized if enabled)
-                - 'time': Time value
+                - One key per field with its data (normalized if enabled)
+                - 'time': Time value(s)
                 - 'idx': Time step index
         """
+        sample = {}
+
         if self.sequence_starts is not None:
             # idx indexes into the sequence starts
             start = self.sequence_starts[idx]
             end = start + self.seq_length
-            # slice along time dimension: (seq_length, n_features)
-            state_seq = self.data[start:end]
+
+            # Add each field as separate key
+            for field_name, data in self.field_data.items():
+                field_seq = data[start:end]  # (seq_length, n_features)
+
+                if self.normalize:
+                    stats = self.field_stats[field_name]
+                    field_seq = (field_seq - stats["mean"]) / stats["std"]
+
+                sample[field_name] = field_seq
+
             time_seq = self.time_steps[start:end]
+            sample["time"] = torch.tensor(time_seq, dtype=torch.float32)
+            sample["idx"] = torch.tensor([start], dtype=torch.long)
+        else:
+            # Single time-step behavior
+            for field_name, data in self.field_data.items():
+                field_data = data[idx]
 
-            if self.normalize:
-                state_seq = (state_seq - self.mean) / self.std
+                if self.normalize:
+                    stats = self.field_stats[field_name]
+                    field_data = (field_data - stats["mean"]) / stats["std"]
 
-            return {
-                "state": state_seq,  # (seq_length, features)
-                "time": torch.tensor(time_seq, dtype=torch.float32),
-                "idx": torch.tensor([start], dtype=torch.long),
-            }
+                sample[field_name] = field_data
 
-        # Single time-step behavior (backwards compatible)
-        state = self.data[idx]
+            sample["time"] = torch.tensor([self.time_steps[idx]], dtype=torch.float32)
+            sample["idx"] = torch.tensor([idx], dtype=torch.long)
 
-        if self.normalize:
-            state = (state - self.mean) / self.std
+        return sample
 
-        return {
-            "state": state,
-            "time": torch.tensor([self.time_steps[idx]], dtype=torch.float32),
-            "idx": torch.tensor([idx], dtype=torch.long),
-        }
-
-    def denormalize(self, state: torch.Tensor) -> torch.Tensor:
-        """Denormalize state vector.
+    def denormalize(self, field_name: str, data: torch.Tensor) -> torch.Tensor:
+        """Denormalize field data.
 
         Args:
-            state: Normalized state tensor
+            field_name: Name of the field
+            data: Normalized data tensor
 
         Returns:
-            Denormalized state tensor
+            Denormalized data tensor
         """
         if self.normalize:
-            return state * self.std + self.mean
-        return state
+            stats = self.field_stats[field_name]
+            return data * stats["std"] + stats["mean"]
+        return data
+
+    def denormalize_all(
+        self, sample: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Denormalize all fields in a sample.
+
+        Args:
+            sample: Dictionary with field data (and potentially 'time', 'idx')
+
+        Returns:
+            Dictionary with denormalized field data
+        """
+        denormalized = {}
+        for key, value in sample.items():
+            if key in self.fields:
+                denormalized[key] = self.denormalize(key, value)
+            else:
+                # Keep non-field keys as-is (time, idx, etc.)
+                denormalized[key] = value
+        return denormalized
 
     @property
     def state_dim(self) -> int:
-        """Return dimension of state vector."""
-        return self.data.shape[1]
+        """Return total dimension of all fields combined (n_points * n_features per field)."""
+        return sum(data.shape[1] * data.shape[2] for data in self.field_data.values())
+
+    @property
+    def field_dims(self) -> Dict[str, int]:
+        """Return dimensions per field as (n_points, n_features) tuples."""
+        return {
+            name: (data.shape[1], data.shape[2])
+            for name, data in self.field_data.items()
+        }

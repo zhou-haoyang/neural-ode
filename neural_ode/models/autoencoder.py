@@ -1,9 +1,10 @@
 """Autoencoder with MLP ResNet architecture for learning latent dynamics."""
 
+from typing import Any, Dict, Optional
+
+import lightning as L
 import torch
 import torch.nn as nn
-import lightning as L
-from typing import Optional, Dict, Any
 
 from .resnet import MLPResNet
 
@@ -138,7 +139,9 @@ class Autoencoder(L.LightningModule):
             "latent_norm": torch.norm(z, dim=-1).mean(),
         }
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         """Training step.
 
         Args:
@@ -151,15 +154,21 @@ class Autoencoder(L.LightningModule):
         metrics = self._compute_loss(batch)
 
         # Log metrics
-        self.log("train/loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True)
+        self.log(
+            "train/loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True
+        )
+        self.log(
+            "train/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True
+        )
         self.log(
             "train/relative_error",
             metrics["relative_error"],
             on_step=False,
             on_epoch=True,
         )
-        self.log("train/latent_norm", metrics["latent_norm"], on_step=False, on_epoch=True)
+        self.log(
+            "train/latent_norm", metrics["latent_norm"], on_step=False, on_epoch=True
+        )
 
         return metrics["loss"]
 
@@ -173,7 +182,9 @@ class Autoencoder(L.LightningModule):
         metrics = self._compute_loss(batch)
 
         # Log metrics
-        self.log("val/loss", metrics["loss"], on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            "val/loss", metrics["loss"], on_step=False, on_epoch=True, prog_bar=True
+        )
         self.log("val/recon_loss", metrics["recon_loss"], on_step=False, on_epoch=True)
         self.log(
             "val/relative_error",
@@ -181,7 +192,9 @@ class Autoencoder(L.LightningModule):
             on_step=False,
             on_epoch=True,
         )
-        self.log("val/latent_norm", metrics["latent_norm"], on_step=False, on_epoch=True)
+        self.log(
+            "val/latent_norm", metrics["latent_norm"], on_step=False, on_epoch=True
+        )
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> None:
         """Test step.

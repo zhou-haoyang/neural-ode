@@ -9,22 +9,24 @@
 # We start by importing DOLFINx and some additional dependencies.
 # Then, we create a slender cantilever consisting of hexahedral elements and create the function space `V` for our unknown.
 
-# %%
-from dolfinx import log, default_scalar_type
-from dolfinx.fem.petsc import NonlinearProblem
-from dolfinx.nls.petsc import NewtonSolver
-import numpy as np
-import ufl
-import json
 import datetime
+import json
 import socket
 
-from mpi4py import MPI
-from dolfinx import fem, mesh
+import numpy as np
+import ufl
+
+# %%
+from dolfinx import default_scalar_type, fem, log, mesh
+from dolfinx.fem.petsc import NonlinearProblem
 from dolfinx.io import XDMFFile
+from dolfinx.nls.petsc import NewtonSolver
+from mpi4py import MPI
 
 L = 10.0
-domain = mesh.create_box(MPI.COMM_WORLD, [[0.0, 0.0, 0.0], [L, 1, 1]], [20, 2, 2], mesh.CellType.hexahedron)
+domain = mesh.create_box(
+    MPI.COMM_WORLD, [[0.0, 0.0, 0.0], [L, 1, 1]], [20, 2, 2], mesh.CellType.hexahedron
+)
 V = fem.functionspace(domain, ("Lagrange", 2, (domain.geometry.dim,)))
 
 # %% [markdown]
@@ -52,7 +54,9 @@ right_facets = mesh.locate_entities_boundary(domain, fdim, right)
 marked_facets = np.hstack([left_facets, right_facets])
 marked_values = np.hstack([np.full_like(left_facets, 1), np.full_like(right_facets, 2)])
 sorted_facets = np.argsort(marked_facets)
-facet_tag = mesh.meshtags(domain, fdim, marked_facets[sorted_facets], marked_values[sorted_facets])
+facet_tag = mesh.meshtags(
+    domain, fdim, marked_facets[sorted_facets], marked_values[sorted_facets]
+)
 
 # %% [markdown]
 # We then create a function for supplying the boundary condition on the left side, which is fixed.
@@ -221,7 +225,9 @@ u_write = fem.Function(V_write)
 v_write = fem.Function(V_write)
 # Scalar space for energy density and tensor space for first Piola-Kirchhoff stress
 Vs_scalar = fem.functionspace(domain, ("Lagrange", 1))
-V_tensor = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim, domain.geometry.dim)))
+V_tensor = fem.functionspace(
+    domain, ("Lagrange", 1, (domain.geometry.dim, domain.geometry.dim))
+)
 psi_write = fem.Function(Vs_scalar)
 P_write = fem.Function(V_tensor)
 

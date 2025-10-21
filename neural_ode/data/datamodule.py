@@ -61,7 +61,9 @@ class HyperelasticityDataModule(L.LightningDataModule):
         self.pin_memory = pin_memory
 
         # Validate splits
-        assert abs(train_split + val_split + test_split - 1.0) < 1e-6, "Train/val/test splits must sum to 1.0"
+        assert (
+            abs(train_split + val_split + test_split - 1.0) < 1e-6
+        ), "Train/val/test splits must sum to 1.0"
 
         self.dataset = None
         self.train_dataset = None
@@ -97,7 +99,9 @@ class HyperelasticityDataModule(L.LightningDataModule):
                 generator=torch.Generator().manual_seed(42),
             )
 
-            print(f"Dataset split - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+            print(
+                f"Dataset split - Train: {train_size}, Val: {val_size}, Test: {test_size}"
+            )
 
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader."""

@@ -1,8 +1,9 @@
 """Neural ODE implementation for learning latent dynamics."""
 
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
 
 try:
     from torchdiffeq import odeint, odeint_adjoint
@@ -113,7 +114,10 @@ class NeuralODE(nn.Module):
         super().__init__()
 
         if not TORCHDIFFEQ_AVAILABLE:
-            raise ImportError("torchdiffeq is required for Neural ODE. " "Install with: pip install torchdiffeq")
+            raise ImportError(
+                "torchdiffeq is required for Neural ODE. "
+                "Install with: pip install torchdiffeq"
+            )
 
         self.ode_func = ode_func
         self.solver = solver
