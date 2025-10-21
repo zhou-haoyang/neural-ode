@@ -1,11 +1,11 @@
 # %% [markdown]
 # # Hyperelasticity
 # Author: Jørgen S. Dokken and Garth N. Wells
-# 
+#
 # This section shows how to solve the hyperelasticity problem for deformation of a beam.
-# 
+#
 # We will also show how to create a constant boundary condition for a vector function space.
-# 
+#
 # We start by importing DOLFINx and some additional dependencies.
 # Then, we create a slender cantilever consisting of hexahedral elements and create the function space `V` for our unknown.
 
@@ -22,12 +22,14 @@ import socket
 from mpi4py import MPI
 from dolfinx import fem, mesh
 from dolfinx.io import XDMFFile
+
 L = 10.0
-domain = mesh.create_box(MPI.COMM_WORLD, [[0.0, 0.0, 0.0], [L, 1, 1]], [5, 2, 2], mesh.CellType.hexahedron)
-V = fem.functionspace(domain, ("Lagrange", 2, (domain.geometry.dim, )))
+domain = mesh.create_box(MPI.COMM_WORLD, [[0.0, 0.0, 0.0], [L, 1, 1]], [20, 2, 2], mesh.CellType.hexahedron)
+V = fem.functionspace(domain, ("Lagrange", 2, (domain.geometry.dim,)))
 
 # %% [markdown]
 # We create two python functions for determining the facets to apply boundary conditions to
+
 
 # %%
 def left(x):
@@ -115,7 +117,7 @@ nu = default_scalar_type(0.3)
 mu = fem.Constant(domain, E / (2 * (1 + nu)))
 lmbda = fem.Constant(domain, E * nu / ((1 + nu) * (1 - 2 * nu)))
 # Stored strain energy density (compressible neo-Hookean model)
-psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J))**2
+psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
 # Stress
 # Hyper-elasticity
 P = ufl.diff(psi, F)
@@ -133,7 +135,7 @@ P = ufl.diff(psi, F)
 
 # %%
 metadata = {"quadrature_degree": 4}
-ds = ufl.Measure('ds', domain=domain, subdomain_data=facet_tag, metadata=metadata)
+ds = ufl.Measure("ds", domain=domain, subdomain_data=facet_tag, metadata=metadata)
 dx = ufl.Measure("dx", domain=domain, metadata=metadata)
 # Define form F (we want to find u such that F(u) = 0)
 F = ufl.inner(ufl.grad(v), P) * dx - ufl.inner(v, B) * dx - ufl.inner(v, T) * ds(2)
@@ -167,7 +169,8 @@ solver.convergence_criterion = "incremental"
 
 # %% [markdown]
 import os
-out_dir = ".data/sim/beam"
+
+out_dir = ".data/sim/beam2"
 os.makedirs(out_dir, exist_ok=True)
 
 # Write basic mesh info (n_cells might not be available everywhere)
@@ -185,7 +188,7 @@ partial_meta = {
     "E": float(E),
     "nu": float(nu),
     "rho": 1.0,
-    "fields": ["displacement", "velocity", "PK1", "energy_density"]
+    "fields": ["displacement", "velocity", "PK1", "energy_density"],
 }
 with open(os.path.join(out_dir, "metadata.json"), "w") as fh:
     json.dump(partial_meta, fh, indent=2)
@@ -213,7 +216,7 @@ v_field.name = "velocity"
 
 xdmf_path = os.path.join(out_dir, "solution.xdmf")
 # Prepare lower-degree write spaces
-V_write = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim, )))
+V_write = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
 u_write = fem.Function(V_write)
 v_write = fem.Function(V_write)
 # Scalar space for energy density and tensor space for first Piola-Kirchhoff stress
@@ -247,7 +250,7 @@ with XDMFFile(domain.comm, xdmf_path, "w") as xdmf:
     for n in range(1, nsteps + 1):
         # Solve nonlinear system for displacement at new time
         num_its, converged = solver.solve(u)
-        assert (converged)
+        assert converged
         u.x.scatter_forward()
 
         # Compute acceleration (central difference)
@@ -284,5 +287,3 @@ with open(os.path.join(out_dir, "metadata.json"), "w") as fh:
     json.dump(full_meta, fh, indent=2)
 # %% [markdown]
 # <img src="./deformation.gif" alt="gif" class="bg-primary mb-1" width="800px">
-
-

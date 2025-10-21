@@ -7,6 +7,7 @@ Usage examples:
 This module exposes a LightningCLI that constructs the `LatentODELightning` module and
 allows passing a DataModule (optional) or raw Trainer configuration via CLI.
 """
+
 from __future__ import annotations
 
 import argparse

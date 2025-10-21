@@ -9,10 +9,10 @@ from .dataset import HyperelasticityDataset
 
 class HyperelasticityDataModule(L.LightningDataModule):
     """DataModule for hyperelasticity simulation data.
-    
+
     Handles train/val/test split and creates dataloaders.
     """
-    
+
     def __init__(
         self,
         data_dir: str = ".data/sim/beam",
@@ -29,7 +29,7 @@ class HyperelasticityDataModule(L.LightningDataModule):
         pin_memory: bool = True,
     ):
         """Initialize HyperelasticityDataModule.
-        
+
         Args:
             data_dir: Directory containing simulation results
             fields: List of fields to load
@@ -44,7 +44,7 @@ class HyperelasticityDataModule(L.LightningDataModule):
         """
         super().__init__()
         self.save_hyperparameters()
-        
+
         self.data_dir = data_dir
         self.fields = fields or ["displacement", "velocity"]
         self.batch_size = batch_size
@@ -57,19 +57,18 @@ class HyperelasticityDataModule(L.LightningDataModule):
         self.seq_stride = seq_stride
         self.num_workers = num_workers
         self.pin_memory = pin_memory
-        
+
         # Validate splits
-        assert abs(train_split + val_split + test_split - 1.0) < 1e-6, \
-            "Train/val/test splits must sum to 1.0"
-            
+        assert abs(train_split + val_split + test_split - 1.0) < 1e-6, "Train/val/test splits must sum to 1.0"
+
         self.dataset = None
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
-        
+
     def setup(self, stage: Optional[str] = None) -> None:
         """Set up datasets for training, validation, and testing.
-        
+
         Args:
             stage: Stage ('fit', 'validate', 'test', or 'predict')
         """
@@ -83,21 +82,21 @@ class HyperelasticityDataModule(L.LightningDataModule):
                 seq_length=self.seq_length,
                 seq_stride=self.seq_stride,
             )
-            
+
             # Split into train/val/test
             total_size = len(self.dataset)
             train_size = int(self.train_split * total_size)
             val_size = int(self.val_split * total_size)
             test_size = total_size - train_size - val_size
-            
+
             self.train_dataset, self.val_dataset, self.test_dataset = random_split(
                 self.dataset,
                 [train_size, val_size, test_size],
                 generator=torch.Generator().manual_seed(42),
             )
-            
+
             print(f"Dataset split - Train: {train_size}, Val: {val_size}, Test: {test_size}")
-    
+
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
         return DataLoader(
@@ -108,7 +107,7 @@ class HyperelasticityDataModule(L.LightningDataModule):
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
         )
-    
+
     def val_dataloader(self) -> DataLoader:
         """Create validation dataloader."""
         return DataLoader(
@@ -119,7 +118,7 @@ class HyperelasticityDataModule(L.LightningDataModule):
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
         )
-    
+
     def test_dataloader(self) -> DataLoader:
         """Create test dataloader."""
         return DataLoader(
@@ -130,14 +129,10 @@ class HyperelasticityDataModule(L.LightningDataModule):
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
         )
-    
+
     @property
     def state_dim(self) -> Optional[int]:
         """Return dimension of state vector."""
         if self.dataset is not None:
             return self.dataset.state_dim
         return None
-
-
-# Import torch for random_split
-import torch
