@@ -1,8 +1,10 @@
 """LightningDataModule for hyperelasticity simulation data."""
 
+from typing import List, Optional
+
 import lightning as L
+import torch
 from torch.utils.data import DataLoader, random_split
-from typing import Optional, List
 
 from .dataset import HyperelasticityDataset
 

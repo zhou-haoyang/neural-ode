@@ -16,7 +16,7 @@ import os
 import lightning as L
 from lightning.pytorch.cli import LightningCLI
 
-from models.latent_ode_lightning import LatentODELightning
+from ..models import LatentODELightning
 
 
 class CLI(LightningCLI):

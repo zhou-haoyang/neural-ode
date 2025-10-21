@@ -1,14 +1,14 @@
 """PyTorch Lightning module for training Latent ODE models."""
 
+from typing import Any, Dict, Optional, Tuple
+
+import lightning as L
 import torch
 import torch.nn as nn
-import lightning as L
-from typing import Optional, Dict, Any, Tuple
 
-from data.dataset import HyperelasticityDataset
-
+from ..data.dataset import HyperelasticityDataset
 from .autoencoder import Autoencoder
-from .neural_ode import ODEFunc, LatentODEModel
+from .neural_ode import LatentODEModel, ODEFunc
 
 
 class LatentODELightning(L.LightningModule):
