@@ -116,8 +116,8 @@ class LatentODELightning(L.LightningModule):
         Returns:
             Dictionary with losses and metrics
         """
-        states = batch["states"]  # (batch_size, seq_len, state_dim)
-        times = batch["times"]    # (batch_size, seq_len)
+        states = batch["state"]  # (batch_size, seq_len, state_dim)
+        times = batch["time"]    # (batch_size, seq_len)
         
         batch_size, seq_len, state_dim = states.shape
         
@@ -238,7 +238,6 @@ class LatentODELightning(L.LightningModule):
             mode="min",
             factor=0.5,
             patience=10,
-            verbose=True,
         )
         
         return {
