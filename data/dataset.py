@@ -1,19 +1,25 @@
-"""Dataset for loading hyperelasticity simulation data."""
+"""Dataset for loading hyperelasticity simulation data.
+
+Loads time-series data from an XDMF file using meshio. This implementation
+expects fields to be written as point data in the XDMF time series written by
+DOLFINx and does not rely on reading raw HDF5 groups.
+"""
 
 import torch
 from torch.utils.data import Dataset
-import h5py
 import numpy as np
+from meshio.xdmf import TimeSeriesReader as XDMFReader
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 import json
 
 
 class HyperelasticityDataset(Dataset):
-    """Dataset for hyperelasticity simulation data stored in XDMF/HDF5 format.
-    
-    The dataset reads displacement, velocity, stress (PK1), and energy density
-    fields from the simulation output.
+    """Dataset for hyperelasticity simulation data stored in XDMF format.
+
+    Uses meshio to read displacement, velocity, stress (PK1), and energy density
+    fields from the simulation output. Requires an XDMF time-series file
+    (e.g., 'solution.xdmf').
     """
     
     def __init__(
@@ -58,11 +64,13 @@ class HyperelasticityDataset(Dataset):
         else:
             self.metadata = {}
             
-        # Load data from HDF5
-        self.h5_path = self.data_dir / "solution.h5"
-        if not self.h5_path.exists():
-            raise FileNotFoundError(f"HDF5 file not found: {self.h5_path}")
-            
+        # Require XDMF via meshio
+        self.xdmf_path = self.data_dir / "solution.xdmf"
+        if not self.xdmf_path.exists():
+            raise FileNotFoundError(
+                f"XDMF file not found: {self.xdmf_path}. This dataset requires 'solution.xdmf'."
+            )
+
         self.data, self.time_steps = self._load_data(time_indices)
         
         # Compute normalization statistics
@@ -89,7 +97,7 @@ class HyperelasticityDataset(Dataset):
         self, 
         time_indices: Optional[List[int]] = None
     ) -> Tuple[torch.Tensor, np.ndarray]:
-        """Load data from HDF5 file.
+        """Load data from XDMF (meshio).
         
         Args:
             time_indices: Specific time step indices to load
@@ -97,57 +105,47 @@ class HyperelasticityDataset(Dataset):
         Returns:
             Tuple of (data tensor, time_steps array)
         """
-        with h5py.File(self.h5_path, "r") as f:
-            # Explore structure
-            print(f"Available groups in HDF5: {list(f.keys())}")
-            
-            # Find all timesteps
-            # The XDMF format stores fields under paths like:
-            # /Mesh/<mesh_id>/displacement/<time_id>
-            # We need to find the mesh group first
-            
-            all_data = []
-            time_steps = []
-            
-            # Try to find the Function group structure
-            # DOLFINx XDMF typically uses: /Function/<function_name>/<step>
-            if "Function" in f:
-                func_group = f["Function"]
-                
-                # Load each requested field
-                field_data = []
-                for field in self.fields:
-                    if field in func_group:
-                        field_group = func_group[field]
-                        
-                        # Get all time step keys (they are usually floats as strings)
-                        step_keys = sorted(field_group.keys(), key=lambda x: float(x))
-                        
-                        if time_indices is not None:
-                            step_keys = [step_keys[i] for i in time_indices if i < len(step_keys)]
-                        
-                        # Load data for each time step
-                        field_timesteps = []
-                        for step_key in step_keys:
-                            data = field_group[step_key][:]
-                            field_timesteps.append(data)
-                            
-                        field_data.append(np.stack(field_timesteps))
-                        
-                        # Extract time steps from first field only
-                        if len(time_steps) == 0:
-                            time_steps = np.array([float(k) for k in step_keys])
-                            
-                # Concatenate all fields along the last dimension
-                # Shape: (n_timesteps, n_points, n_features)
-                if len(field_data) > 0:
-                    all_data = np.concatenate(field_data, axis=-1)
-                else:
-                    raise ValueError("No field data found")
-                    
-            else:
-                raise ValueError("Could not find Function group in HDF5 file")
-        
+        # Only meshio XDMF path is supported
+        all_steps: dict[str, list[np.ndarray]] = {}
+        times: List[float] = []
+        with XDMFReader(str(self.xdmf_path)) as reader:
+            # Ensure points/cells can be read (also validates file)
+            _points, _cells = reader.read_points_cells()
+            num_steps = reader.num_steps
+
+            # Build list of step indices respecting time_indices
+            step_indices = list(range(num_steps))
+            if time_indices is not None:
+                step_indices = [i for i in time_indices if 0 <= i < num_steps]
+
+            # Load temporal data
+            for domain in reader.domain:
+                attrib = domain.attrib
+                if attrib["Name"] not in self.fields:
+                    continue
+                if attrib["GridType"] != "Collection" or attrib["CollectionType"] != "Temporal":
+                    raise ValueError(
+                        f"Expected XDMF domain '{attrib['Name']}' to be a temporal collection for time series data."
+                    )
+
+                for k in step_indices:
+                    for element in domain[k]:
+                        if element.tag == "Time" and len(times) < len(step_indices):
+                            times.append(float(element.attrib["Value"]))
+                        elif element.tag == "Attribute":
+                            assert element.attrib["Name"] == attrib["Name"]
+                            assert len(element) == 1
+                            data = reader._read_data_item(element[0])
+                            all_steps.setdefault(attrib["Name"], []).append(data)
+
+
+        # Stack across time: (n_timesteps, n_points, n_features)
+        all_data = np.concatenate(
+            [np.stack(all_steps[field], axis=0) for field in self.fields],
+            axis=-1,
+        )
+        time_steps = np.asarray(times, dtype=float)
+
         # Subsample spatial points if requested
         if self.subsample_points is not None and self.subsample_points < all_data.shape[1]:
             rng = np.random.RandomState(42)
