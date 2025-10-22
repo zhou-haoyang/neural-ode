@@ -192,7 +192,7 @@ class HyperelasticityDataset(Dataset):
                             data = reader._read_data_item(element[0])
                             all_steps.setdefault(attrib["Name"], []).append(data)
 
-        time_steps = np.asarray(times, dtype=float)
+        time_steps = torch.tensor(times, dtype=torch.float32)
 
         # Store each field separately as a dict: {field_name: (n_timesteps, n_points, n_features)}
         field_data = {}
@@ -276,7 +276,7 @@ class HyperelasticityDataset(Dataset):
                 sample[field_name] = field_seq
 
             time_seq = self.time_steps[start:end]
-            sample["time"] = torch.tensor(time_seq, dtype=torch.float32)
+            sample["time"] = time_seq
             sample["idx"] = torch.tensor([start], dtype=torch.long)
         else:
             # Single time-step behavior
@@ -289,7 +289,7 @@ class HyperelasticityDataset(Dataset):
 
                 sample[field_name] = field_data
 
-            sample["time"] = torch.tensor([self.time_steps[idx]], dtype=torch.float32)
+            sample["time"] = self.time_steps[idx]
             sample["idx"] = torch.tensor([idx], dtype=torch.long)
 
         return sample

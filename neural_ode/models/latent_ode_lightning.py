@@ -5,10 +5,152 @@ from typing import Any, Dict, List, Optional, Tuple
 import lightning as L
 import torch
 import torch.nn as nn
+from tqdm import tqdm
+import numpy as np
+import pyvista as pv
 
 from ..data.dataset import HyperelasticityDataset
 from .autoencoder import Autoencoder
 from .neural_ode import LatentODEModel, ODEFunc
+
+
+def create_animation(
+    results: dict,
+    output_path: Optional[str] = None,
+    framerate: int = 10,
+    show_error: bool = True,
+    show_reference: bool = True,
+):
+    """Create PyVista animation of predicted vs reference trajectories.
+
+    Args:
+        results: Dictionary from integrate_full_trajectory
+        output_path: Path to save animation (e.g., 'animation.gif' or 'animation.mp4')
+        framerate: Frames per second for animation
+        show_error: Whether to color mesh by error magnitude
+        show_reference: Whether to show reference mesh alongside prediction
+    """
+    points = results["points"]
+    faces = results["faces"]
+    pred_disp = results["pred_displacement"]
+    ref_disp = results["ref_displacement"]
+    times = results["times"]
+
+    n_timesteps = len(times)
+
+    # Convert faces to PyVista format (prepend count)
+    pv_faces = np.column_stack([np.full(len(faces), 3), faces]).flatten()
+
+    # Create plotter
+    if show_reference:
+        plotter = pv.Plotter(shape=(1, 2), off_screen=output_path is not None)
+    else:
+        plotter = pv.Plotter(off_screen=output_path is not None)
+
+    # Set up initial camera position (will be reused for all frames)
+    camera_position = None
+    camera_position_ref = None
+
+    # Function to update frame
+    def update_frame(frame_idx: int):
+        nonlocal camera_position, camera_position_ref
+
+        plotter.clear()
+
+        # Deformed points
+        pred_points_deformed = points + pred_disp[frame_idx]
+        ref_points_deformed = points + ref_disp[frame_idx]
+
+        # Create meshes
+        pred_mesh = pv.PolyData(pred_points_deformed, pv_faces)
+        ref_mesh = pv.PolyData(ref_points_deformed, pv_faces)
+
+        if show_error:
+            # Compute per-point error
+            error = np.linalg.norm(pred_disp[frame_idx] - ref_disp[frame_idx], axis=1)
+            pred_mesh["error"] = error
+
+        # Plot prediction
+        if show_reference:
+            plotter.subplot(0, 0)
+
+        if show_error:
+            plotter.add_mesh(
+                pred_mesh,
+                scalars="error",
+                cmap="hot",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+                scalar_bar_args={"title": "Error"},
+            )
+        else:
+            plotter.add_mesh(
+                pred_mesh,
+                color="lightblue",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+            )
+
+        plotter.add_text(
+            f"Prediction (t={times[frame_idx]:.3f}s)",
+            position="upper_edge",
+            font_size=12,
+        )
+
+        # Set camera only on first frame, then reuse
+        if camera_position is None:
+            plotter.view_isometric()
+            camera_position = plotter.camera_position
+        else:
+            plotter.camera_position = camera_position
+
+        # Plot reference if requested
+        if show_reference:
+            plotter.subplot(0, 1)
+            plotter.add_mesh(
+                ref_mesh,
+                color="lightgreen",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+            )
+            plotter.add_text(
+                f"Reference (t={times[frame_idx]:.3f}s)",
+                position="upper_edge",
+                font_size=12,
+            )
+
+            # Set camera only on first frame, then reuse
+            if camera_position_ref is None:
+                plotter.view_isometric()
+                camera_position_ref = plotter.camera_position
+            else:
+                plotter.camera_position = camera_position_ref
+
+    # Create animation
+    if output_path:
+        print(f"\nGenerating animation: {output_path}")
+        plotter.open_gif(output_path, fps=framerate)
+
+        for frame_idx in tqdm(range(n_timesteps), desc="Rendering frames"):
+            update_frame(frame_idx)
+            plotter.write_frame()
+
+        plotter.close()
+        print(f"Animation saved to: {output_path}")
+    else:
+        # Interactive animation
+        print("\nStarting interactive animation (close window to exit)")
+        plotter.show(auto_close=False)
+
+        for frame_idx in range(n_timesteps):
+            update_frame(frame_idx)
+            plotter.render()
+            plotter.update(force_redraw=True)
+
+        plotter.close()
 
 
 class LatentODELightning(L.LightningModule):
@@ -102,6 +244,23 @@ class LatentODELightning(L.LightningModule):
         """
         return self.latent_ode(x0, t)
 
+    def _get_input_states(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Get input states from batch by concatenating displacement and velocity.
+
+        Args:
+            batch: Batch dictionary with field data
+
+        Returns:
+            States tensor of shape (batch_size, seq_len, state_dim)
+        """
+        states = torch.cat([batch["displacement"], batch["velocity"]], dim=-1).flatten(
+            start_dim=-2
+        )  # (batch_size, seq_len, total_dim)
+        return states
+
     def _predict_sequence(
         self,
         batch: Dict[str, torch.Tensor],
@@ -119,9 +278,7 @@ class LatentODELightning(L.LightningModule):
         """
         times = batch["time"]  # (batch_size, seq_len)
 
-        states = torch.cat([batch["displacement"], batch["velocity"]], dim=-1).flatten(
-            start_dim=2
-        )  # (batch_size, seq_len, total_dim)
+        states = self._get_input_states(batch)  # (batch_size, seq_len, total_dim)
 
         batch["states"] = states
 
@@ -217,6 +374,49 @@ class LatentODELightning(L.LightningModule):
             global_step=self.current_epoch,
         )
 
+    def _visualize_trajectory(self) -> None:
+        """Visualize predicted trajectory as animation."""
+        dataset: HyperelasticityDataset = self.trainer.datamodule.dataset
+
+        # Integrate over full trajectory
+        first_sample = dataset[0]
+        states = self._get_input_states(first_sample)  # (seq_len, state_dim)
+
+        x0 = states[[0], :].to(self.device)  # (1, state_dim)
+        t = dataset.time_steps.to(self.device)  # (n_timesteps,)
+        x_pred = self.latent_ode(x0, t)  # (n_timesteps, 1, state_dim)
+        x_pred = x_pred.squeeze(1).unflatten(
+            -1, (dataset.points.shape[0], 6)
+        )  # (n_timesteps, n_points, 6)
+        pred_displacement = dataset.denormalize("displacement", x_pred[..., :3].cpu())
+        pred_velocity = dataset.denormalize(
+            "velocity", x_pred[..., 3:].cpu()
+        )  # (n_timesteps, n_points, 3)
+        # Create results dict
+        results = {
+            "pred_displacement": pred_displacement.numpy(),
+            "pred_velocity": pred_velocity.numpy(),
+            "ref_displacement": dataset.field_data[
+                "displacement"
+            ].numpy(),  # (n_timesteps, n_points, 3)
+            "ref_velocity": dataset.field_data[
+                "velocity"
+            ].numpy(),  # (n_timesteps, n_points, 3)
+            "times": dataset.time_steps.numpy(),
+            "points": dataset.points.numpy(),
+            "faces": dataset.faces.numpy(),
+        }
+
+        # Create animation
+        output_path = f"trajectory_epoch_{self.current_epoch:04d}.gif"
+        create_animation(
+            results,
+            output_path=output_path,
+            framerate=10,
+            show_error=True,
+            show_reference=True,
+        )
+
     def training_step(
         self,
         batch: Dict[str, torch.Tensor],
@@ -286,6 +486,10 @@ class LatentODELightning(L.LightningModule):
 
         # Visualize mesh
         self._visualize_mesh(pred_dict, ref_dict)
+
+        # Visualize trajectory every 50 epochs
+        if self.current_epoch > 0 and self.current_epoch % 50 == 0:
+            self._visualize_trajectory()
 
     def test_step(
         self,
