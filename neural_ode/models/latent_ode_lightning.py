@@ -14,6 +14,142 @@ from .autoencoder import Autoencoder
 from .neural_ode import LatentODEModel, ODEFunc
 
 
+def create_animation_frames(
+    results: dict,
+    show_error: bool = True,
+    show_reference: bool = True,
+    resolution: tuple = (800, 600),
+) -> np.ndarray:
+    """Create animation frames for TensorBoard video logging.
+
+    Args:
+        results: Dictionary from integrate_full_trajectory
+        show_error: Whether to color mesh by error magnitude
+        show_reference: Whether to show reference mesh alongside prediction
+        resolution: (width, height) of output frames
+
+    Returns:
+        Video frames as numpy array of shape (T, H, W, C) where T is number of timesteps
+    """
+    points = results["points"]
+    faces = results["faces"]
+    pred_disp = results["pred_displacement"]
+    ref_disp = results["ref_displacement"]
+    times = results["times"]
+
+    n_timesteps = len(times)
+
+    # Convert faces to PyVista format (prepend count)
+    pv_faces = np.column_stack([np.full(len(faces), 3), faces]).flatten()
+
+    # Create off-screen plotter
+    if show_reference:
+        plotter = pv.Plotter(shape=(1, 2), off_screen=True, window_size=resolution)
+    else:
+        plotter = pv.Plotter(off_screen=True, window_size=resolution)
+
+    # Set up initial camera position (will be reused for all frames)
+    camera_position = None
+    camera_position_ref = None
+
+    frames = []
+
+    # Function to render frame
+    def render_frame(frame_idx: int):
+        nonlocal camera_position, camera_position_ref
+
+        plotter.clear()
+
+        # Deformed points
+        pred_points_deformed = points + pred_disp[frame_idx]
+        ref_points_deformed = points + ref_disp[frame_idx]
+
+        # Create meshes
+        pred_mesh = pv.PolyData(pred_points_deformed, pv_faces)
+        ref_mesh = pv.PolyData(ref_points_deformed, pv_faces)
+
+        if show_error:
+            # Compute per-point error
+            error = np.linalg.norm(pred_disp[frame_idx] - ref_disp[frame_idx], axis=1)
+            pred_mesh["error"] = error
+
+        # Plot prediction
+        if show_reference:
+            plotter.subplot(0, 0)
+
+        if show_error:
+            plotter.add_mesh(
+                pred_mesh,
+                scalars="error",
+                cmap="hot",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+                scalar_bar_args={"title": "Error"},
+            )
+        else:
+            plotter.add_mesh(
+                pred_mesh,
+                color="lightblue",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+            )
+
+        plotter.add_text(
+            f"Prediction (t={times[frame_idx]:.3f}s)",
+            position="upper_edge",
+            font_size=12,
+        )
+
+        # Set camera only on first frame, then reuse
+        if camera_position is None:
+            plotter.view_isometric()
+            camera_position = plotter.camera_position
+        else:
+            plotter.camera_position = camera_position
+
+        # Plot reference if requested
+        if show_reference:
+            plotter.subplot(0, 1)
+            plotter.add_mesh(
+                ref_mesh,
+                color="lightgreen",
+                show_edges=True,
+                edge_color="black",
+                line_width=0.5,
+            )
+            plotter.add_text(
+                f"Reference (t={times[frame_idx]:.3f}s)",
+                position="upper_edge",
+                font_size=12,
+            )
+
+            # Set camera only on first frame, then reuse
+            if camera_position_ref is None:
+                plotter.view_isometric()
+                camera_position_ref = plotter.camera_position
+            else:
+                plotter.camera_position = camera_position_ref
+
+        # Capture frame as image
+        plotter.render()
+        img = plotter.screenshot(return_img=True)
+        return img
+
+    # Generate all frames
+    for frame_idx in tqdm(range(n_timesteps), desc="Rendering frames"):
+        frame = render_frame(frame_idx)
+        frames.append(frame)
+
+    plotter.close()
+
+    # Stack frames into video array (T, H, W, C)
+    video = np.stack(frames, axis=0)
+
+    return video
+
+
 def create_animation(
     results: dict,
     output_path: Optional[str] = None,
@@ -375,7 +511,7 @@ class LatentODELightning(L.LightningModule):
         )
 
     def _visualize_trajectory(self) -> None:
-        """Visualize predicted trajectory as animation."""
+        """Visualize predicted trajectory as TensorBoard video."""
         dataset: HyperelasticityDataset = self.trainer.datamodule.dataset
 
         # Integrate over full trajectory
@@ -392,6 +528,7 @@ class LatentODELightning(L.LightningModule):
         pred_velocity = dataset.denormalize(
             "velocity", x_pred[..., 3:].cpu()
         )  # (n_timesteps, n_points, 3)
+
         # Create results dict
         results = {
             "pred_displacement": pred_displacement.numpy(),
@@ -407,14 +544,25 @@ class LatentODELightning(L.LightningModule):
             "faces": dataset.faces.numpy(),
         }
 
-        # Create animation
-        output_path = f"trajectory_epoch_{self.current_epoch:04d}.gif"
-        create_animation(
+        # Generate video frames
+        video_frames = create_animation_frames(
             results,
-            output_path=output_path,
-            framerate=10,
             show_error=True,
             show_reference=True,
+            resolution=(800, 600),  # Higher resolution for better quality
+        )
+
+        # Convert to TensorBoard format: (N, T, C, H, W)
+        # video_frames is (T, H, W, C), we need to add batch dimension and reorder
+        video_tensor = torch.from_numpy(video_frames).permute(0, 3, 1, 2).unsqueeze(0)
+        # Shape: (1, T, C, H, W)
+
+        # Log to TensorBoard
+        self.logger.experiment.add_video(
+            tag="trajectory/prediction_vs_reference",
+            vid_tensor=video_tensor,
+            global_step=self.current_epoch,
+            fps=10,
         )
 
     def training_step(
@@ -487,8 +635,11 @@ class LatentODELightning(L.LightningModule):
         # Visualize mesh
         self._visualize_mesh(pred_dict, ref_dict)
 
+    def on_validation_epoch_end(self):
+        """Called at the end of the validation epoch."""
         # Visualize trajectory every 50 epochs
         if self.current_epoch > 0 and self.current_epoch % 50 == 0:
+            # if self.current_epoch % 50 == 0:
             self._visualize_trajectory()
 
     def test_step(
